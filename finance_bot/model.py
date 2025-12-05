@@ -152,9 +152,9 @@ class OTFinanceModel:
 
     def cvar(self, returns: pd.Series, alpha: float = 0.95) -> float:
         sorted_returns = returns.sort_values()
-        cutoff = max(int((1 - alpha) * len(sorted_returns)), 1)
+        cutoff = int((1 - alpha) * len(sorted_returns))
         tail = sorted_returns.iloc[:cutoff]
-        return float(tail.mean())
+        return tail.mean()
 
     def value_at_risk(self, returns: pd.Series, alpha: float = 0.95) -> VaRResult:
         var = float(returns.quantile(1 - alpha))
@@ -163,10 +163,7 @@ class OTFinanceModel:
 
     def sharpe_ratio(self, returns: pd.Series) -> float:
         excess = returns - self.risk_free_rate / 252
-        volatility = excess.std(ddof=1)
-        if volatility == 0:
-            return 0.0
-        return float(np.sqrt(252) * excess.mean() / volatility)
+        return np.sqrt(252) * excess.mean() / excess.std(ddof=1)
 
     def mean_variance_portfolio(self, returns: pd.DataFrame) -> PortfolioWeights:
         covariance = returns.cov()
@@ -186,11 +183,8 @@ class OTFinanceModel:
         objective = cp.Minimize(cp.sum_squares(rc - port_var / n_assets))
         constraints = [cp.sum(w) == 1, w >= 0]
         problem = cp.Problem(objective, constraints)
-        problem.solve(warm_start=True, solver=cp.SCS)
-        if w.value is None:
-            weights = np.full(n_assets, 1 / n_assets)
-        else:
-            weights = np.array(w.value).flatten()
+        problem.solve(warm_start=True)
+        weights = np.array(w.value).flatten()
         weights = weights / weights.sum()
         risk_contribution = weights * covariance.dot(weights)
         return PortfolioWeights(pd.Series(weights, index=returns.columns), pd.Series(risk_contribution, index=returns.columns))
@@ -233,11 +227,8 @@ class OTFinanceModel:
         objective = cp.Maximize(mu @ w - radius * cp.norm(w, 2) - 0.5 * cp.quad_form(w, sigma))
         constraints = [cp.sum(w) == 1, w >= 0]
         problem = cp.Problem(objective, constraints)
-        problem.solve(warm_start=True, solver=cp.SCS)
-        if w.value is None:
-            weights = np.full(n_assets, 1 / n_assets)
-        else:
-            weights = np.array(w.value).flatten()
+        problem.solve(warm_start=True)
+        weights = np.array(w.value).flatten()
         weights = np.maximum(weights, 0)
         weights = weights / weights.sum()
         covariance = returns.cov()
@@ -252,7 +243,7 @@ class OTFinanceModel:
     ) -> pd.Series:
         returns = prices.pct_change().dropna()
         portfolio_returns = returns.dot(strategy_weights.weights)
-        turnover = strategy_weights.weights.diff().abs().fillna(0).sum()
+        turnover = strategy_weights.weights.diff().abs().sum()
         costs = turnover * rebalance_cost
         after_cost = portfolio_returns - costs
         return (1 + after_cost).cumprod()
