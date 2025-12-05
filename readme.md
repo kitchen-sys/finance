@@ -8,8 +8,6 @@ This project provides a lightweight implementation of an optimal-transport inspi
 - **Portfolio construction**: Mean-variance, risk-parity, Wasserstein-robust, and regime-adaptive allocation helpers plus a simple event-driven backtester.
 - **Discord live scanner**: Pulls the latest data for S&P 500, NASDAQ 100, Dow, and most-active lists; outputs the top 5 buy and boom setups for each category.
 - **Alpha / signal layer**: Cross-sectional models (Fama–French style factors, factor regressions, idiosyncratic return isolation), ML forecasters (tree-based, regularized linear, sequence models), and causal/event estimators (causal forests, doubly robust learners, OT-based treated vs control comparison) to drive “own this, short that, right now” decisions.
-- **Factor risk model**: Systematic vs idiosyncratic risk decomposition, factor covariance vs idio variances, marginal/component risk contributions per factor and per asset, and liquidity-aware haircuts.
-- **Dependence & tail risk**: Dynamic-correlation (DCC-style) matrices, copula-derived tail dependence, OT-based joint dependence gaps, extreme-value POT fits, and liquidity/funding-aware constraints.
 
 ## Quickstart
 1. **Install dependencies**
@@ -72,29 +70,6 @@ target = returns.stack().sort_index()
 forecaster = CrossSectionalMLForecaster()
 forecaster.fit(features, target)
 latest_signals = forecaster.predict_latest(features)
-```
-
-### Factor risk & dependence example
-```python
-import pandas as pd
-from finance_bot import FactorRiskModel
-
-# factor_returns: DataFrame of factor return series
-# exposures: MultiIndex columns (factor, asset)
-# residuals: idiosyncratic residuals from factor regression
-# weights: portfolio weights as a Series indexed by asset
-risk_model = FactorRiskModel()
-decomp = risk_model.decompose(weights, exposures, factor_returns, residuals)
-
-# Dynamic correlations, copula tail dependence, and OT-based joint gaps
-dcc_corr = risk_model.dcc_dynamic_correlation(returns)
-tail_dep = risk_model.copula_tail_dependence(returns)
-ot_joint = risk_model.ot_dependence_matrix(returns)
-
-# Extreme value tail fit and liquidity-aware haircuts
-shape, threshold, scale = risk_model.pot_extreme_value(returns["SPY"])
-days_to_liq = risk_model.liquidity_score(weights, prices, volumes)
-constrained_weights = risk_model.apply_haircuts(weights, haircuts, leverage_limit=1.5)
 ```
 
 ## Notes
