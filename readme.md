@@ -7,6 +7,7 @@ This project provides a lightweight implementation of an optimal-transport inspi
 - **Time series toolkit**: Auto-ARIMA fitting and forecasting, Kalman filtering for latent regimes, and GARCH/EGARCH/GJR-GARCH/FIGARCH volatility forecasting to support VaR/CVaR-style risk metrics.
 - **Portfolio construction**: Mean-variance, risk-parity, Wasserstein-robust, and regime-adaptive allocation helpers plus a simple event-driven backtester.
 - **Discord live scanner**: Pulls the latest data for S&P 500, NASDAQ 100, Dow, and most-active lists; outputs the top 5 buy and boom setups for each category.
+- **Alpha / signal layer**: Cross-sectional models (Fama–French style factors, factor regressions, idiosyncratic return isolation), ML forecasters (tree-based, regularized linear, sequence models), and causal/event estimators (causal forests, doubly robust learners, OT-based treated vs control comparison) to drive “own this, short that, right now” decisions.
 
 ## Quickstart
 1. **Install dependencies**
@@ -32,6 +33,44 @@ This project provides a lightweight implementation of an optimal-transport inspi
 - **Volatility forecasting**: GARCH/EGARCH/GJR-GARCH powered forecasts.
 - **Portfolio construction**: Mean-variance, Wasserstein-stability tilt, and DRO-style penalty adjustments.
 - **Risk metrics**: Rolling Sharpe, CVaR estimates, and event-driven backtesting with basic transaction costs.
+
+## Alpha / signal layer
+The signal stack complements the OT/optimization pipeline with cross-sectional predictors so the system can select what to own or short right now.
+
+- **Cross-sectional factor backbone**
+  - Fama–French style factors: size, value, quality, momentum, low volatility, and more.
+  - Per-date cross-sectional regressions of returns on factors to estimate loadings and isolate residual (idiosyncratic) returns to trade while managing factor risk.
+- **Machine learning forecasters**
+  - Tree models (XGBoost / LightGBM) for next-period return, direction, or rank.
+  - Linear / regularized models (Lasso, Elastic Net) for high-dimensional feature sets.
+  - Sequence models (basic RNN, LSTM, temporal CNN, transformer) for multi-horizon forecasts.
+- **Causal & event models**
+  - Treatment-effect estimators for events such as earnings, Fed meetings, and macro releases.
+  - Causal forests and doubly robust learners.
+  - Optimal transport to compare treated vs control distributions around events.
+
+### Cross-sectional usage example
+```python
+import pandas as pd
+from finance_bot import CrossSectionalSignalLayer, CrossSectionalMLForecaster
+
+# prices and volumes are DataFrames indexed by date with ticker columns
+signal_layer = CrossSectionalSignalLayer()
+exposures = signal_layer.compute_factor_exposures(prices, volumes)
+returns = prices.pct_change().dropna()
+
+# Cross-sectional regressions of returns on factors
+regression = signal_layer.regress_factors(returns, exposures)
+idiosyncratic = regression.residuals
+zscore_alpha = signal_layer.idiosyncratic_zscore(idiosyncratic)
+
+# Cross-sectional ML forecast using MultiIndex features (date, ticker)
+features = exposures.stack().swaplevel().sort_index()
+target = returns.stack().sort_index()
+forecaster = CrossSectionalMLForecaster()
+forecaster.fit(features, target)
+latest_signals = forecaster.predict_latest(features)
+```
 
 ## Notes
 - The scanner uses yfinance universes and limits each category to the top 50 tickers for responsiveness.
