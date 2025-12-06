@@ -9,6 +9,7 @@ class BotConfig:
     """Configuration for the live scanner and Discord bot."""
 
     discord_token: str
+    alpha_vantage_key: str
     announcement_channel_ids: List[int]
     categories: List[str] = field(
         default_factory=lambda: ["sp500", "nasdaq100", "dow", "most_active"]
@@ -22,3 +23,5 @@ class BotConfig:
     yfinance_options: Dict[str, bool] = field(
         default_factory=lambda: {"progress": False, "threads": True}
     )
+    use_alpha_vantage_technicals: bool = True
+    use_alpha_vantage_fundamentals: bool = True
