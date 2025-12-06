@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -11,6 +11,7 @@ import yfinance as yf
 
 from .config import BotConfig
 from .model import OTFinanceModel
+from .alpha_vantage_provider import AlphaVantageProvider
 
 
 @dataclass
@@ -23,11 +24,12 @@ class ScanResult:
 class YFinanceScanner:
     """Live scanner built on yfinance data with OT-aware scoring."""
 
-    def __init__(self, config: BotConfig):
+    def __init__(self, config: BotConfig, av_provider: Optional[AlphaVantageProvider] = None):
         self.config = config
         self.model = OTFinanceModel(
             lookback_regime=config.lookback_regime, risk_free_rate=config.risk_free_rate
         )
+        self.av_provider = av_provider
 
     @lru_cache(maxsize=8)
     def _universe(self, category: str) -> List[str]:
@@ -59,7 +61,7 @@ class YFinanceScanner:
                 data[ticker] = hist
         return data
 
-    def _score_buy(self, history: pd.DataFrame) -> float:
+    def _score_buy(self, history: pd.DataFrame, ticker: Optional[str] = None) -> float:
         closes = history["Close"].dropna()
         if len(closes) < self.config.lookback_buy:
             return -np.inf
@@ -67,9 +69,17 @@ class YFinanceScanner:
         ma = closes.rolling(self.config.lookback_buy).mean().iloc[-1]
         momentum = recent.pct_change().mean()
         volatility = recent.pct_change().std()
-        return float(momentum - volatility + (recent.iloc[-1] - ma) / ma)
+        base_score = float(momentum - volatility + (recent.iloc[-1] - ma) / ma)
 
-    def _score_boom(self, history: pd.DataFrame) -> float:
+        # Enhance with Alpha Vantage technical indicators
+        if self.av_provider and ticker and self.config.use_alpha_vantage_technicals:
+            av_score = self._get_av_technical_score(ticker)
+            # Weighted combination: 70% base, 30% Alpha Vantage
+            return 0.7 * base_score + 0.3 * av_score
+
+        return base_score
+
+    def _score_boom(self, history: pd.DataFrame, ticker: Optional[str] = None) -> float:
         closes = history["Close"].dropna()
         if len(closes) < self.config.lookback_boom + 5:
             return -np.inf
@@ -78,7 +88,43 @@ class YFinanceScanner:
         volume_surge = history["Volume"].tail(self.config.lookback_boom).mean() / (
             history["Volume"].tail(self.config.lookback_boom * 4).mean()
         )
-        return float(breakout * volume_surge)
+        base_score = float(breakout * volume_surge)
+
+        # Enhance with Alpha Vantage ADX for trend strength
+        if self.av_provider and ticker and self.config.use_alpha_vantage_technicals:
+            trend_strength = self._get_av_trend_strength(ticker)
+            # Boost score if strong trend detected
+            return base_score * (1 + 0.5 * trend_strength)
+
+        return base_score
+
+    def _get_av_technical_score(self, ticker: str) -> float:
+        """Get composite technical score from Alpha Vantage indicators."""
+        try:
+            indicators = self.av_provider.get_technical_indicators(
+                ticker, indicators=['RSI', 'MACD', 'STOCH']
+            )
+            score, _ = self.av_provider.compute_technical_score(indicators)
+            return score
+        except Exception as e:
+            print(f"Error getting AV technical score for {ticker}: {e}")
+            return 0.0
+
+    def _get_av_trend_strength(self, ticker: str) -> float:
+        """Get trend strength from Alpha Vantage ADX indicator."""
+        try:
+            indicators = self.av_provider.get_technical_indicators(
+                ticker, indicators=['ADX']
+            )
+            if 'ADX' in indicators and not indicators['ADX'].empty:
+                adx = indicators['ADX'].iloc[-1]['ADX']
+                # ADX > 25 indicates strong trend
+                # Normalize to [0, 1] range
+                return min((adx - 25) / 50, 1.0) if adx > 25 else 0.0
+            return 0.0
+        except Exception as e:
+            print(f"Error getting AV trend strength for {ticker}: {e}")
+            return 0.0
 
     def _prepare_scan(self, category: str) -> ScanResult:
         tickers = self._universe(category)
@@ -86,8 +132,8 @@ class YFinanceScanner:
         scored_buy: List[Tuple[str, float]] = []
         scored_boom: List[Tuple[str, float]] = []
         for symbol, hist in history.items():
-            buy_score = self._score_buy(hist)
-            boom_score = self._score_boom(hist)
+            buy_score = self._score_buy(hist, ticker=symbol)
+            boom_score = self._score_boom(hist, ticker=symbol)
             scored_buy.append((symbol, buy_score))
             scored_boom.append((symbol, boom_score))
         scored_buy.sort(key=lambda item: item[1], reverse=True)

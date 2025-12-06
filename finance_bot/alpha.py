@@ -8,6 +8,8 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import ElasticNet
 
+from finance_bot.alpha_vantage_provider import AlphaVantageProvider
+
 
 @dataclass
 class CrossSectionalRegressionResult:
@@ -27,12 +29,16 @@ class CrossSectionalSignalLayer:
         volatility_window: int = 21,
         quality_window: int = 21,
         size_window: int = 63,
+        av_provider: Optional[AlphaVantageProvider] = None,
+        use_av_technicals: bool = False,
     ) -> None:
         self.momentum_window = momentum_window
         self.value_window = value_window
         self.volatility_window = volatility_window
         self.quality_window = quality_window
         self.size_window = size_window
+        self.av_provider = av_provider
+        self.use_av_technicals = use_av_technicals
 
     def compute_factor_exposures(
         self, prices: pd.DataFrame, volumes: Optional[pd.DataFrame] = None
@@ -63,8 +69,111 @@ class CrossSectionalSignalLayer:
             size = np.log(dollar_vol.rolling(self.size_window).mean())
             factors["size"] = size
 
+        # Add Alpha Vantage technical indicators as factors
+        if self.use_av_technicals and self.av_provider is not None:
+            av_factors = self._compute_av_technical_factors(prices.columns.tolist())
+            if av_factors:
+                factors.update(av_factors)
+
         exposures = pd.concat(factors, axis=1)
         return exposures
+
+    def _compute_av_technical_factors(self, tickers: list) -> Dict[str, pd.DataFrame]:
+        """Fetch and normalize Alpha Vantage technical indicators as factors."""
+        av_factors = {}
+
+        # Collect RSI, MACD signal strength, and ADX for each ticker
+        rsi_data = {}
+        macd_strength = {}
+        adx_data = {}
+
+        for ticker in tickers:
+            try:
+                indicators = self.av_provider.get_technical_indicators(
+                    ticker, indicators=['RSI', 'MACD', 'ADX']
+                )
+
+                if 'RSI' in indicators:
+                    rsi_df = indicators['RSI']
+                    # Normalize RSI to [-1, 1]: oversold positive, overbought negative
+                    rsi_normalized = (50 - rsi_df['RSI']) / 50
+                    rsi_data[ticker] = rsi_normalized
+
+                if 'MACD' in indicators:
+                    macd_df = indicators['MACD']
+                    # Use MACD histogram as momentum signal
+                    macd_strength[ticker] = macd_df['MACD_Hist']
+
+                if 'ADX' in indicators:
+                    adx_df = indicators['ADX']
+                    # Normalize ADX: higher = stronger trend
+                    adx_normalized = (adx_df['ADX'] - 25) / 25
+                    adx_data[ticker] = adx_normalized
+
+            except Exception as e:
+                print(f"Error fetching AV indicators for {ticker}: {e}")
+                continue
+
+        # Convert to DataFrames
+        if rsi_data:
+            av_factors['av_rsi'] = pd.DataFrame(rsi_data)
+        if macd_strength:
+            av_factors['av_macd'] = pd.DataFrame(macd_strength)
+        if adx_data:
+            av_factors['av_trend'] = pd.DataFrame(adx_data)
+
+        return av_factors
+
+    def compute_enhanced_quality_factor(
+        self, prices: pd.DataFrame, tickers: list
+    ) -> Optional[pd.DataFrame]:
+        """
+        Compute enhanced quality factor using Alpha Vantage fundamental data.
+
+        Combines traditional price-based quality with fundamental metrics:
+        - ROE (Return on Equity)
+        - ROA (Return on Assets)
+        - Profit Margin
+        - Operating Margin
+
+        Returns:
+            DataFrame with enhanced quality scores per ticker
+        """
+        if not self.av_provider:
+            return None
+
+        quality_scores = {}
+
+        for ticker in tickers:
+            try:
+                fundamentals = self.av_provider.get_fundamentals(ticker)
+                metrics = self.av_provider.extract_quality_metrics(fundamentals)
+
+                # Composite quality score from fundamental metrics
+                score_components = []
+
+                if metrics.get('roe'):
+                    score_components.append(metrics['roe'])
+                if metrics.get('roa'):
+                    score_components.append(metrics['roa'])
+                if metrics.get('profit_margin'):
+                    score_components.append(metrics['profit_margin'])
+                if metrics.get('operating_margin'):
+                    score_components.append(metrics['operating_margin'])
+
+                if score_components:
+                    # Average of available metrics
+                    quality_scores[ticker] = np.mean(score_components)
+
+            except Exception as e:
+                print(f"Error computing enhanced quality for {ticker}: {e}")
+                continue
+
+        if quality_scores:
+            # Create DataFrame with single row (broadcast to all dates later)
+            return pd.DataFrame([quality_scores])
+
+        return None
 
     def regress_factors(
         self, returns: pd.DataFrame, exposures: pd.DataFrame
