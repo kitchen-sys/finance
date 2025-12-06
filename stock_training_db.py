@@ -1015,18 +1015,160 @@ Provide a clear, insightful answer based on the data above."""
 
         return response
 
-    def chat(self):
-        """Interactive chat interface."""
+    def _show_menu(self):
+        """Display the menu options."""
         print("\n" + "="*70)
-        print("🤖 AI Stock Insight Agent")
+        print("🤖 AI Stock Insight Agent - Menu")
         print("="*70)
-        print("Ask me anything about your stock training data!")
-        print("Examples:")
-        print("  - What are the top performers?")
-        print("  - Which stocks show regime changes?")
-        print("  - Analyze risk metrics")
-        print("  - Give me trading recommendations")
-        print("\nType 'quit' or 'exit' to leave.\n")
+        print("\n📊 QUICK QUERIES:")
+        print("  [1] Top Performers (60-day returns)")
+        print("  [2] Regime Changes Detected")
+        print("  [3] Risk & Volatility Analysis")
+        print("  [4] Sharpe Ratio Rankings")
+        print("  [5] Trading Recommendations")
+        print("  [6] Market Summary & Overview")
+        print("  [7] Most Volatile Stocks")
+        print("  [8] Best Risk-Adjusted Returns")
+        print("  [9] Bottom Performers")
+        print("  [10] Alpha Vantage Technical Analysis")
+        print("\n💬 FREE-FORM:")
+        print("  [70] Free Chat Mode (ask anything)")
+        print("\n  [0] Exit")
+        print("="*70)
+
+    def menu(self):
+        """Interactive menu-driven interface."""
+        print("\n🚀 Welcome to AI Stock Insight Agent!")
+
+        # Check if we have any training data
+        latest_run = self.db.get_latest_run()
+        if not latest_run:
+            print("\n⚠️  No training data found!")
+            print("Run training first: python stock_training_db.py --train\n")
+            return
+
+        while True:
+            try:
+                self._show_menu()
+
+                choice = input("\nSelect option (0 to exit): ").strip()
+
+                if choice == '0' or choice.lower() in ['exit', 'quit', 'q']:
+                    print("\n👋 Goodbye!\n")
+                    break
+
+                if not choice:
+                    continue
+
+                # Handle the choice
+                response = None
+
+                if choice == '1':
+                    response = self._analyze_top_performers(
+                        [r for r in self.db.get_run_results(latest_run['run_id'])
+                         if not r['error_message']]
+                    )
+                elif choice == '2':
+                    response = self._analyze_regime_changes(
+                        [r for r in self.db.get_run_results(latest_run['run_id'])
+                         if not r['error_message']]
+                    )
+                elif choice == '3':
+                    response = self._analyze_risk_metrics(
+                        [r for r in self.db.get_run_results(latest_run['run_id'])
+                         if not r['error_message']]
+                    )
+                elif choice == '4':
+                    response = self._analyze_sharpe_ratios(
+                        [r for r in self.db.get_run_results(latest_run['run_id'])
+                         if not r['error_message']]
+                    )
+                elif choice == '5':
+                    response = self._generate_recommendations(
+                        [r for r in self.db.get_run_results(latest_run['run_id'])
+                         if not r['error_message']]
+                    )
+                elif choice == '6':
+                    response = self._generate_summary(
+                        latest_run,
+                        [r for r in self.db.get_run_results(latest_run['run_id'])
+                         if not r['error_message']]
+                    )
+                elif choice == '7':
+                    response = self.query("Show me the most volatile stocks")
+                elif choice == '8':
+                    response = self.query("Which stocks have the best risk-adjusted returns?")
+                elif choice == '9':
+                    results = [r for r in self.db.get_run_results(latest_run['run_id'])
+                              if not r['error_message'] and r['return_60d'] is not None]
+                    bottom_perf = sorted(results, key=lambda x: x['return_60d'])[:5]
+
+                    response = "📉 Bottom 5 Performers (60-day return):\n\n"
+                    for i, r in enumerate(bottom_perf, 1):
+                        ret = r['return_60d'] * 100
+                        sharpe = r['sharpe_ratio'] or 0
+                        response += f"{i}. {r['ticker']:6s}: {ret:+7.2f}% (Sharpe: {sharpe:.3f})\n"
+
+                    response += "\n💡 Insight: Consider these for potential reversal plays or avoid if downtrend continues."
+
+                elif choice == '10':
+                    results = [r for r in self.db.get_run_results(latest_run['run_id'])
+                              if not r['error_message'] and r['av_technical_score'] is not None]
+
+                    if results:
+                        sorted_av = sorted(results, key=lambda x: x['av_technical_score'], reverse=True)[:8]
+                        response = "📊 Alpha Vantage Technical Analysis (Top 8):\n\n"
+                        for i, r in enumerate(sorted_av, 1):
+                            response += f"{i}. {r['ticker']:6s}: Score {r['av_technical_score']:.3f}"
+                            if r['av_rsi']:
+                                response += f" | RSI: {r['av_rsi']:.1f}"
+                            if r['av_pe_ratio']:
+                                response += f" | P/E: {r['av_pe_ratio']:.1f}"
+                            response += "\n"
+                        response += "\n💡 Higher technical scores indicate better technical setup."
+                    else:
+                        response = "No Alpha Vantage data available. Make sure ALPHA_VANTAGE_KEY is set and run training with API enabled."
+
+                elif choice == '70':
+                    # Enter free chat mode
+                    self._free_chat_mode()
+                    continue
+
+                else:
+                    print("\n❌ Invalid option. Please select a number from the menu.")
+                    continue
+
+                # Display the response
+                if response:
+                    print("\n" + "="*70)
+                    print(response)
+                    print("="*70)
+
+                # Ask if user wants to continue
+                while True:
+                    continue_choice = input("\n🔄 Run another query? (y/n): ").strip().lower()
+                    if continue_choice in ['y', 'yes']:
+                        break  # Go back to menu
+                    elif continue_choice in ['n', 'no']:
+                        print("\n👋 Goodbye!\n")
+                        return
+                    else:
+                        print("Please enter 'y' or 'n'")
+
+            except KeyboardInterrupt:
+                print("\n\n👋 Goodbye!\n")
+                break
+            except Exception as e:
+                print(f"\n❌ Error: {e}\n")
+                import traceback
+                traceback.print_exc()
+
+    def _free_chat_mode(self):
+        """Free-form chat mode (option 70)."""
+        print("\n" + "="*70)
+        print("💬 Free Chat Mode - Ask me anything!")
+        print("="*70)
+        print("Type 'menu' to return to menu, 'quit' to exit completely.\n")
 
         while True:
             try:
@@ -1034,6 +1176,10 @@ Provide a clear, insightful answer based on the data above."""
 
                 if user_input.lower() in ['quit', 'exit', 'q']:
                     print("\n👋 Goodbye!\n")
+                    exit(0)
+
+                if user_input.lower() in ['menu', 'back']:
+                    print("\n↩️  Returning to menu...\n")
                     break
 
                 if not user_input:
@@ -1044,9 +1190,13 @@ Provide a clear, insightful answer based on the data above."""
 
             except KeyboardInterrupt:
                 print("\n\n👋 Goodbye!\n")
-                break
+                exit(0)
             except Exception as e:
                 print(f"\n❌ Error: {e}\n")
+
+    def chat(self):
+        """Legacy chat interface - redirects to menu."""
+        self.menu()
 
 
 def main():

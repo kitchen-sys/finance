@@ -1,6 +1,8 @@
 # Stock Training Database with AI Agent
 
-A comprehensive stock training system with persistent database storage and RAG-powered AI agent for intelligent insights on 20 top tech stocks using Alpha Vantage data.
+A comprehensive stock training system with persistent database storage and RAG-powered AI agent for intelligent insights on 20 top tech stocks using **real market data** from Alpha Vantage API.
+
+> **📡 Real Data Training:** This system uses **actual market data** from yfinance and Alpha Vantage APIs for training. When you provide your Alpha Vantage API key, you get real technical indicators (RSI, MACD, ADX), fundamental data (P/E ratios, ROE, profit margins), and live market metrics for production-grade analysis.
 
 ## Features
 
@@ -72,18 +74,49 @@ python stock_training_db.py --train --history 730 --lookback 90
 
 ### Chat with AI Agent
 
-Launch the interactive AI agent to analyze training results:
+Launch the interactive AI agent with menu-driven interface:
 
 ```bash
 python stock_training_db.py --chat
 ```
 
-Example queries:
+**Menu Options:**
+
+The AI agent presents a numbered menu for quick access to common queries:
+
+**Quick Queries (1-10):**
+- `[1]` Top Performers (60-day returns)
+- `[2]` Regime Changes Detected
+- `[3]` Risk & Volatility Analysis
+- `[4]` Sharpe Ratio Rankings
+- `[5]` Trading Recommendations
+- `[6]` Market Summary & Overview
+- `[7]` Most Volatile Stocks
+- `[8]` Best Risk-Adjusted Returns
+- `[9]` Bottom Performers
+- `[10]` Alpha Vantage Technical Analysis
+
+**Free-Form Chat:**
+- `[70]` Free Chat Mode - Ask anything in natural language
+
+**Exit:**
+- `[0]` Exit the program
+
+**How it works:**
+1. Select a number from the menu
+2. View the analysis results
+3. Answer "y/n" to run another query
+4. "y" returns to menu, "n" exits
+
+**Option 70 - Free Chat Mode:**
+When you select option 70, you enter free-form chat where you can ask questions like:
 - "What are the top performers?"
 - "Which stocks show regime changes?"
 - "Analyze risk metrics"
 - "Give me trading recommendations"
 - "What's the general market summary?"
+
+Type "menu" to return to the menu, or "quit" to exit.
 
 ### Combined Workflow
 
