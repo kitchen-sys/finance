@@ -22,6 +22,16 @@ from dotenv import load_dotenv
 from finance_bot.model import OTFinanceModel
 from finance_bot.alpha_vantage_provider import AlphaVantageProvider
 
+# PDF and vector database imports
+try:
+    import chromadb
+    from chromadb.config import Settings
+    from pypdf import PdfReader
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    PDF_SUPPORT_AVAILABLE = True
+except ImportError:
+    PDF_SUPPORT_AVAILABLE = False
+
 
 # Top 20 Tech Stocks for tracking
 TECH_STOCKS_20 = [
@@ -111,6 +121,297 @@ class StockTrainingResult:
 
     # Errors
     error_message: Optional[str] = None
+
+
+class PDFVectorStore:
+    """PDF ingestion system with chunking and vector database using ChromaDB and SQLite."""
+
+    def __init__(self, db_path: str = "./pdf_metadata.db", chroma_path: str = "./chroma_db"):
+        """Initialize PDF vector store.
+
+        Args:
+            db_path: Path to SQLite database for PDF metadata
+            chroma_path: Path to ChromaDB persistent storage
+        """
+        if not PDF_SUPPORT_AVAILABLE:
+            raise ImportError(
+                "PDF support not available. Install required packages:\n"
+                "pip install chromadb pypdf langchain-text-splitters"
+            )
+
+        self.db_path = db_path
+        self.chroma_path = chroma_path
+
+        # Initialize SQLite for metadata
+        self.conn = sqlite3.connect(db_path)
+        self.conn.row_factory = sqlite3.Row
+        self._create_metadata_tables()
+
+        # Initialize ChromaDB for vector storage
+        self.chroma_client = chromadb.PersistentClient(path=chroma_path)
+        self.collection = self.chroma_client.get_or_create_collection(
+            name="pdf_documents",
+            metadata={"description": "PDF document chunks with embeddings"}
+        )
+
+        # Text splitter for chunking
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            length_function=len,
+            separators=["\n\n", "\n", " ", ""]
+        )
+
+    def _create_metadata_tables(self):
+        """Create SQLite tables for PDF metadata."""
+        cursor = self.conn.cursor()
+
+        # PDF documents table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pdf_documents (
+                pdf_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                filepath TEXT NOT NULL UNIQUE,
+                upload_timestamp TEXT NOT NULL,
+                num_pages INTEGER,
+                num_chunks INTEGER,
+                file_size_bytes INTEGER,
+                title TEXT,
+                author TEXT,
+                subject TEXT
+            )
+        """)
+
+        # Chunks table (for reference, actual vectors in ChromaDB)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pdf_chunks (
+                chunk_id TEXT PRIMARY KEY,
+                pdf_id INTEGER NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                page_number INTEGER,
+                chunk_text TEXT NOT NULL,
+                chunk_length INTEGER,
+                FOREIGN KEY (pdf_id) REFERENCES pdf_documents(pdf_id)
+            )
+        """)
+
+        self.conn.commit()
+
+    def ingest_pdf(self, pdf_path: str) -> Dict[str, Any]:
+        """Ingest a PDF file: extract text, chunk it, and store in vector database.
+
+        Args:
+            pdf_path: Path to the PDF file
+
+        Returns:
+            Dictionary with ingestion results
+        """
+        pdf_path = Path(pdf_path).resolve()
+
+        if not pdf_path.exists():
+            raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+
+        print(f"\n📄 Ingesting PDF: {pdf_path.name}")
+
+        # Check if already ingested
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT pdf_id FROM pdf_documents WHERE filepath = ?", (str(pdf_path),))
+        existing = cursor.fetchone()
+
+        if existing:
+            print(f"⚠️  PDF already ingested. Skipping.")
+            return {"status": "skipped", "pdf_id": existing[0], "reason": "already_exists"}
+
+        # Read PDF
+        reader = PdfReader(str(pdf_path))
+        num_pages = len(reader.pages)
+
+        # Extract metadata
+        metadata = reader.metadata or {}
+        title = metadata.get('/Title', pdf_path.stem)
+        author = metadata.get('/Author', '')
+        subject = metadata.get('/Subject', '')
+
+        # Extract text from all pages
+        full_text = ""
+        page_texts = []
+        for i, page in enumerate(reader.pages):
+            page_text = page.extract_text()
+            page_texts.append((i + 1, page_text))
+            full_text += f"\n\n--- Page {i + 1} ---\n\n{page_text}"
+
+        print(f"📖 Extracted text from {num_pages} pages")
+
+        # Chunk the text
+        chunks = self.text_splitter.split_text(full_text)
+        num_chunks = len(chunks)
+
+        print(f"✂️  Split into {num_chunks} chunks")
+
+        # Store metadata in SQLite
+        timestamp = datetime.now().isoformat()
+        cursor.execute("""
+            INSERT INTO pdf_documents
+            (filename, filepath, upload_timestamp, num_pages, num_chunks, file_size_bytes, title, author, subject)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            pdf_path.name,
+            str(pdf_path),
+            timestamp,
+            num_pages,
+            num_chunks,
+            pdf_path.stat().st_size,
+            title,
+            author,
+            subject
+        ))
+        pdf_id = cursor.lastrowid
+        self.conn.commit()
+
+        # Store chunks in ChromaDB and SQLite
+        chunk_ids = []
+        chunk_metadatas = []
+        chunk_texts = []
+
+        for i, chunk_text in enumerate(chunks):
+            chunk_id = f"pdf_{pdf_id}_chunk_{i}"
+            chunk_ids.append(chunk_id)
+            chunk_texts.append(chunk_text)
+
+            # Determine page number for this chunk (approximate)
+            page_num = min(i // max(1, num_chunks // num_pages) + 1, num_pages)
+
+            chunk_metadatas.append({
+                "pdf_id": pdf_id,
+                "chunk_index": i,
+                "page_number": page_num,
+                "filename": pdf_path.name,
+                "title": title
+            })
+
+            # Store in SQLite for reference
+            cursor.execute("""
+                INSERT INTO pdf_chunks (chunk_id, pdf_id, chunk_index, page_number, chunk_text, chunk_length)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (chunk_id, pdf_id, i, page_num, chunk_text, len(chunk_text)))
+
+        self.conn.commit()
+
+        # Add to ChromaDB (with automatic embeddings)
+        print(f"🔮 Creating embeddings and storing in vector database...")
+        self.collection.add(
+            ids=chunk_ids,
+            documents=chunk_texts,
+            metadatas=chunk_metadatas
+        )
+
+        print(f"✅ Successfully ingested PDF: {pdf_path.name}")
+        print(f"   PDF ID: {pdf_id} | Pages: {num_pages} | Chunks: {num_chunks}")
+
+        return {
+            "status": "success",
+            "pdf_id": pdf_id,
+            "filename": pdf_path.name,
+            "num_pages": num_pages,
+            "num_chunks": num_chunks
+        }
+
+    def search(self, query: str, n_results: int = 5) -> List[Dict[str, Any]]:
+        """Search for relevant chunks using semantic similarity.
+
+        Args:
+            query: Search query
+            n_results: Number of results to return
+
+        Returns:
+            List of relevant chunks with metadata
+        """
+        results = self.collection.query(
+            query_texts=[query],
+            n_results=n_results
+        )
+
+        formatted_results = []
+
+        if results['ids'] and len(results['ids'][0]) > 0:
+            for i in range(len(results['ids'][0])):
+                formatted_results.append({
+                    'chunk_id': results['ids'][0][i],
+                    'text': results['documents'][0][i],
+                    'metadata': results['metadatas'][0][i],
+                    'distance': results['distances'][0][i] if 'distances' in results else None
+                })
+
+        return formatted_results
+
+    def list_pdfs(self) -> List[Dict[str, Any]]:
+        """List all ingested PDFs."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT pdf_id, filename, upload_timestamp, num_pages, num_chunks, title, author
+            FROM pdf_documents
+            ORDER BY upload_timestamp DESC
+        """)
+
+        pdfs = []
+        for row in cursor.fetchall():
+            pdfs.append({
+                'pdf_id': row['pdf_id'],
+                'filename': row['filename'],
+                'upload_timestamp': row['upload_timestamp'],
+                'num_pages': row['num_pages'],
+                'num_chunks': row['num_chunks'],
+                'title': row['title'],
+                'author': row['author']
+            })
+
+        return pdfs
+
+    def delete_pdf(self, pdf_id: int) -> bool:
+        """Delete a PDF and all its chunks.
+
+        Args:
+            pdf_id: ID of the PDF to delete
+
+        Returns:
+            True if successful, False otherwise
+        """
+        cursor = self.conn.cursor()
+
+        # Get chunk IDs to delete from ChromaDB
+        cursor.execute("SELECT chunk_id FROM pdf_chunks WHERE pdf_id = ?", (pdf_id,))
+        chunk_ids = [row['chunk_id'] for row in cursor.fetchall()]
+
+        if chunk_ids:
+            # Delete from ChromaDB
+            self.collection.delete(ids=chunk_ids)
+
+        # Delete from SQLite
+        cursor.execute("DELETE FROM pdf_chunks WHERE pdf_id = ?", (pdf_id,))
+        cursor.execute("DELETE FROM pdf_documents WHERE pdf_id = ?", (pdf_id,))
+        self.conn.commit()
+
+        return True
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get statistics about the PDF collection."""
+        cursor = self.conn.cursor()
+
+        cursor.execute("SELECT COUNT(*) as count FROM pdf_documents")
+        num_pdfs = cursor.fetchone()['count']
+
+        cursor.execute("SELECT COUNT(*) as count FROM pdf_chunks")
+        num_chunks = cursor.fetchone()['count']
+
+        cursor.execute("SELECT SUM(file_size_bytes) as total FROM pdf_documents")
+        total_size = cursor.fetchone()['total'] or 0
+
+        return {
+            'num_pdfs': num_pdfs,
+            'num_chunks': num_chunks,
+            'total_size_mb': total_size / (1024 * 1024),
+            'chroma_collection_count': self.collection.count()
+        }
 
 
 class StockTrainingDatabase:
@@ -635,6 +936,9 @@ class AIInsightAgent:
         # Initialize conversation history
         self.conversation_history: List[Dict[str, str]] = []
 
+        # Initialize PDF vector store (lazy initialization)
+        self._pdf_store: Optional[PDFVectorStore] = None
+
     def _build_context(self, query: str) -> str:
         """Build context from database for RAG."""
         context_parts = []
@@ -1033,6 +1337,8 @@ Provide a clear, insightful answer based on the data above."""
         print("  [10] Alpha Vantage Technical Analysis")
         print("\n💬 FREE-FORM:")
         print("  [70] Free Chat Mode (ask anything)")
+        print("\n📄 DOCUMENT MANAGEMENT:")
+        print("  [71] PDF Ingestion & Vector Search")
         print("\n  [0] Exit")
         print("="*70)
 
@@ -1134,6 +1440,11 @@ Provide a clear, insightful answer based on the data above."""
                     self._free_chat_mode()
                     continue
 
+                elif choice == '71':
+                    # Enter PDF ingestion mode
+                    self._pdf_ingest_mode()
+                    continue
+
                 else:
                     print("\n❌ Invalid option. Please select a number from the menu.")
                     continue
@@ -1193,6 +1504,168 @@ Provide a clear, insightful answer based on the data above."""
                 exit(0)
             except Exception as e:
                 print(f"\n❌ Error: {e}\n")
+
+    @property
+    def pdf_store(self) -> PDFVectorStore:
+        """Lazy initialization of PDF vector store."""
+        if self._pdf_store is None:
+            if not PDF_SUPPORT_AVAILABLE:
+                raise ImportError(
+                    "PDF support not available. Install required packages:\n"
+                    "pip install chromadb pypdf langchain-text-splitters"
+                )
+            self._pdf_store = PDFVectorStore()
+        return self._pdf_store
+
+    def _pdf_ingest_mode(self):
+        """PDF ingestion and vector search mode (option 71)."""
+        print("\n" + "="*70)
+        print("📄 PDF Ingestion & Vector Search System")
+        print("="*70)
+        print("\nCommands:")
+        print("  • ingest <path>  - Ingest a PDF file")
+        print("  • list          - List all ingested PDFs")
+        print("  • search <query> - Search PDFs using vector similarity")
+        print("  • delete <id>   - Delete a PDF by ID")
+        print("  • stats         - Show collection statistics")
+        print("  • menu/back     - Return to main menu")
+        print("  • quit/exit     - Exit completely")
+        print("="*70)
+
+        # Check if PDF support is available
+        if not PDF_SUPPORT_AVAILABLE:
+            print("\n❌ PDF support not available!")
+            print("Install required packages:")
+            print("  pip install chromadb pypdf langchain-text-splitters")
+            input("\nPress Enter to return to menu...")
+            return
+
+        while True:
+            try:
+                user_input = input("\nPDF> ").strip()
+
+                if not user_input:
+                    continue
+
+                # Parse command
+                parts = user_input.split(maxsplit=1)
+                command = parts[0].lower()
+                args = parts[1] if len(parts) > 1 else ""
+
+                # Handle quit/exit
+                if command in ['quit', 'exit', 'q']:
+                    print("\n👋 Goodbye!\n")
+                    exit(0)
+
+                # Handle menu/back
+                if command in ['menu', 'back']:
+                    print("\n↩️  Returning to menu...\n")
+                    break
+
+                # Handle ingest
+                if command == 'ingest':
+                    if not args:
+                        print("❌ Usage: ingest <path>")
+                        continue
+
+                    try:
+                        result = self.pdf_store.ingest_pdf(args)
+                        if result['status'] == 'success':
+                            print(f"\n✅ PDF ingested successfully!")
+                        elif result['status'] == 'skipped':
+                            print(f"\n⚠️  PDF already exists in database")
+                    except Exception as e:
+                        print(f"\n❌ Error ingesting PDF: {e}")
+
+                # Handle list
+                elif command == 'list':
+                    pdfs = self.pdf_store.list_pdfs()
+                    if not pdfs:
+                        print("\n📭 No PDFs ingested yet")
+                    else:
+                        print(f"\n📚 Ingested PDFs ({len(pdfs)} total):\n")
+                        print(f"{'ID':<6} {'Filename':<40} {'Pages':<8} {'Chunks':<8} {'Title':<30}")
+                        print("-" * 100)
+                        for pdf in pdfs:
+                            title = pdf['title'][:27] + "..." if len(pdf['title']) > 30 else pdf['title']
+                            filename = pdf['filename'][:37] + "..." if len(pdf['filename']) > 40 else pdf['filename']
+                            print(f"{pdf['pdf_id']:<6} {filename:<40} {pdf['num_pages']:<8} {pdf['num_chunks']:<8} {title:<30}")
+
+                # Handle search
+                elif command == 'search':
+                    if not args:
+                        print("❌ Usage: search <query>")
+                        continue
+
+                    print(f"\n🔍 Searching for: '{args}'")
+                    results = self.pdf_store.search(args, n_results=5)
+
+                    if not results:
+                        print("📭 No results found")
+                    else:
+                        print(f"\n📊 Found {len(results)} relevant chunks:\n")
+                        for i, result in enumerate(results, 1):
+                            meta = result['metadata']
+                            text_preview = result['text'][:200].replace('\n', ' ')
+                            if len(result['text']) > 200:
+                                text_preview += "..."
+
+                            print(f"\n{'='*70}")
+                            print(f"Result {i} - {meta['filename']} (Page {meta['page_number']})")
+                            if result['distance'] is not None:
+                                print(f"Similarity Score: {1 - result['distance']:.4f}")
+                            print(f"{'='*70}")
+                            print(f"{text_preview}\n")
+
+                # Handle delete
+                elif command == 'delete':
+                    if not args:
+                        print("❌ Usage: delete <id>")
+                        continue
+
+                    try:
+                        pdf_id = int(args)
+                        confirm = input(f"Are you sure you want to delete PDF ID {pdf_id}? (y/n): ").strip().lower()
+                        if confirm == 'y':
+                            self.pdf_store.delete_pdf(pdf_id)
+                            print(f"\n✅ PDF {pdf_id} deleted successfully")
+                        else:
+                            print("\n❌ Deletion cancelled")
+                    except ValueError:
+                        print("❌ Invalid PDF ID (must be a number)")
+                    except Exception as e:
+                        print(f"\n❌ Error deleting PDF: {e}")
+
+                # Handle stats
+                elif command == 'stats':
+                    stats = self.pdf_store.get_stats()
+                    print("\n📊 PDF Collection Statistics:")
+                    print(f"  Total PDFs: {stats['num_pdfs']}")
+                    print(f"  Total Chunks: {stats['num_chunks']}")
+                    print(f"  Total Size: {stats['total_size_mb']:.2f} MB")
+                    print(f"  ChromaDB Collection Count: {stats['chroma_collection_count']}")
+
+                # Handle help
+                elif command in ['help', 'h', '?']:
+                    print("\nAvailable Commands:")
+                    print("  • ingest <path>  - Ingest a PDF file")
+                    print("  • list          - List all ingested PDFs")
+                    print("  • search <query> - Search PDFs using vector similarity")
+                    print("  • delete <id>   - Delete a PDF by ID")
+                    print("  • stats         - Show collection statistics")
+                    print("  • menu/back     - Return to main menu")
+                    print("  • quit/exit     - Exit completely")
+
+                else:
+                    print(f"❌ Unknown command: '{command}'. Type 'help' for available commands.")
+
+            except KeyboardInterrupt:
+                print("\n\n👋 Goodbye!\n")
+                exit(0)
+            except Exception as e:
+                print(f"\n❌ Error: {e}")
+                import traceback
+                traceback.print_exc()
 
     def chat(self):
         """Legacy chat interface - redirects to menu."""
