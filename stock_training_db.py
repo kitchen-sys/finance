@@ -124,7 +124,57 @@ class StockTrainingResult:
 
 
 class PDFVectorStore:
-    """PDF ingestion system with chunking and vector database using ChromaDB and SQLite."""
+    """PDF ingestion system with chunking and vector database using ChromaDB and SQLite.
+
+    DATABASE SCHEMA:
+
+    SQLite Tables (Metadata Storage):
+
+    1. pdf_documents:
+        - pdf_id (INTEGER PRIMARY KEY): Auto-incrementing unique identifier
+        - filename (TEXT NOT NULL): Name of the PDF file
+        - filepath (TEXT NOT NULL UNIQUE): Full path to the PDF file
+        - upload_timestamp (TEXT NOT NULL): ISO timestamp of ingestion
+        - num_pages (INTEGER): Total number of pages in PDF
+        - num_chunks (INTEGER): Total number of text chunks created
+        - file_size_bytes (INTEGER): Size of PDF file in bytes
+        - title (TEXT): PDF document title from metadata
+        - author (TEXT): PDF document author from metadata
+        - subject (TEXT): PDF document subject from metadata
+
+    2. pdf_chunks:
+        - chunk_id (TEXT PRIMARY KEY): Unique chunk identifier (format: "pdf_{pdf_id}_chunk_{index}")
+        - pdf_id (INTEGER NOT NULL): Foreign key to pdf_documents.pdf_id
+        - chunk_index (INTEGER NOT NULL): Sequential index of chunk within document
+        - page_number (INTEGER): Approximate page number for this chunk
+        - chunk_text (TEXT NOT NULL): Full text content of the chunk
+        - chunk_length (INTEGER): Length of chunk text in characters
+        - FOREIGN KEY (pdf_id) REFERENCES pdf_documents(pdf_id)
+
+    ChromaDB Collection (Vector Storage):
+
+    - Collection name: "pdf_documents"
+    - Stores vector embeddings for each chunk with automatic embedding generation
+    - Metadata stored per chunk:
+        - pdf_id: Reference to source PDF
+        - chunk_index: Sequential index within document
+        - page_number: Approximate page location
+        - filename: Source PDF filename
+        - title: Document title
+
+    Text Chunking Strategy:
+
+    - Algorithm: RecursiveCharacterTextSplitter
+    - Chunk size: 1000 characters
+    - Chunk overlap: 200 characters (preserves context across boundaries)
+    - Separators: ["\n\n", "\n", " ", ""] (paragraph, line, word, character)
+
+    Vector Search:
+
+    - Uses ChromaDB's default embedding model
+    - Semantic similarity search across all chunks
+    - Returns chunks ranked by relevance with distance scores
+    """
 
     def __init__(self, db_path: str = "./pdf_metadata.db", chroma_path: str = "./chroma_db"):
         """Initialize PDF vector store.
